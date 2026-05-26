@@ -243,6 +243,31 @@ fn rewrite_memcpy(line: &Expr) -> Vec<Expr> {
 // Empty branch cleanup
 // ---------------------------------------------------------------------------
 
+/// True when a branch is empty or only LOOP/continue no-ops (renders as `pass`).
+fn branch_is_effectively_empty(branch: &[Expr]) -> bool {
+    branch.is_empty() || branch.iter().all(is_pass_like_stmt)
+}
+
+fn is_pass_like_stmt(expr: &Expr) -> bool {
+    match expr.opcode() {
+        Some("LOOP") => {
+            let ch = match expr.children() {
+                Some(c) if c.len() >= 2 => c,
+                _ => return false,
+            };
+            let cond_true = matches!(ch[0], Expr::Bool(true))
+                || ch[0].as_val().map_or(false, |v| !v.is_zero());
+            if !cond_true {
+                return false;
+            }
+            let body = extract_seq_children(&ch[1]);
+            body.len() == 1 && body[0].opcode() == Some("continue")
+        }
+        Some("seq") => branch_is_effectively_empty(&extract_seq_children(expr)),
+        _ => false,
+    }
+}
+
 /// Recursively remove if statements where both branches are empty.
 fn cleanup_empty_pass(trace: &[Expr]) -> Trace {
     let mut result = Vec::new();
@@ -251,17 +276,35 @@ fn cleanup_empty_pass(trace: &[Expr]) -> Trace {
             Some("if") => {
                 if let Some(ch) = line.children() {
                     if ch.len() >= 3 {
-                        let true_branch = extract_seq_children(&ch[1]);
-                        let false_branch = extract_seq_children(&ch[2]);
+                        let true_branch = cleanup_empty_pass(&extract_seq_children(&ch[1]));
+                        let false_branch = cleanup_empty_pass(&extract_seq_children(&ch[2]));
                         if true_branch.is_empty() && false_branch.is_empty() {
                             continue; // Remove empty if.
                         }
-                        // Recurse into branches.
+                        if branch_is_effectively_empty(&false_branch) && !true_branch.is_empty() {
+                            result.push(Expr::node3(
+                                "if",
+                                ch[0].clone(),
+                                Expr::node("seq", true_branch),
+                                Expr::node("seq", vec![]),
+                            ));
+                            continue;
+                        }
+                        if branch_is_effectively_empty(&true_branch) && !false_branch.is_empty() {
+                            // Invert: if !cond: false_body
+                            result.push(Expr::node3(
+                                "if",
+                                Expr::node1("iszero", ch[0].clone()),
+                                Expr::node("seq", false_branch),
+                                Expr::node("seq", vec![]),
+                            ));
+                            continue;
+                        }
                         result.push(Expr::node3(
                             "if",
                             ch[0].clone(),
-                            Expr::node("seq", cleanup_empty_pass(&true_branch)),
-                            Expr::node("seq", cleanup_empty_pass(&false_branch)),
+                            Expr::node("seq", true_branch),
+                            Expr::node("seq", false_branch),
                         ));
                     } else {
                         result.push(line.clone());
@@ -324,6 +367,27 @@ mod tests {
         let result = rewrite(&trace);
         assert!(result.iter().any(|e| e.opcode() == Some("require")));
         assert!(result.iter().any(|e| e.opcode() == Some("stop")));
+    }
+
+    #[test]
+    fn test_cleanup_empty_pass_branch() {
+        let pass_branch = vec![Expr::node2(
+            "LOOP",
+            Expr::Bool(true),
+            Expr::node("seq", vec![Expr::node0("continue")]),
+        )];
+        let real_branch = vec![Expr::node1("return", Expr::val(1))];
+        let trace = vec![Expr::node3(
+            "if",
+            Expr::atom("cond"),
+            Expr::node("seq", pass_branch),
+            Expr::node("seq", real_branch.clone()),
+        )];
+        let result = cleanup_empty_pass(&trace);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].opcode(), Some("if"));
+        let ch = result[0].children().unwrap();
+        assert_eq!(ch[0].opcode(), Some("iszero"));
     }
 
     #[test]

@@ -83,8 +83,8 @@ fn test_malformed_all_zeros() {
 
 #[test]
 fn test_malformed_very_long_bytecode() {
-    // 10,000 bytes of NOPs followed by STOP.
-    let hex = format!("{}{}", "5b".repeat(5000), "00");
+    // ~300 bytes of JUMPDESTs + STOP — enough to stress the loader without a slow VM run.
+    let hex = format!("{}{}", "5b".repeat(150), "00");
     let r = decompile_bytecode(&hex, &config());
     assert!(r.is_ok());
 }

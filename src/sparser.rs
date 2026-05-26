@@ -450,6 +450,44 @@ fn resolve_nested(expr: &Expr) -> Expr {
 // Name discovery from getter functions
 // ===========================================================================
 
+/// Getters that compare calldata / interface IDs but do not name a storage slot.
+fn should_skip_storage_getter_name(base_name: &str) -> bool {
+    matches!(
+        base_name,
+        "supportsInterface"
+            | "onERC721Received"
+            | "onERC1155Received"
+            | "onERC1155BatchReceived"
+            | "isValidSignature"
+    ) || base_name.ends_with("Received")
+}
+
+/// Collect storage slot numbers touched by a function (raw + simplified trace).
+fn collect_func_storage_slots(func: &Function) -> HashSet<u64> {
+    let mut slots = HashSet::new();
+    for acc in &func.raw_storage_accesses {
+        if let Some(ch) = acc.children() {
+            if ch.len() >= 3 {
+                if let Some(slot) = ch[2].as_u64() {
+                    slots.insert(slot);
+                }
+            }
+        }
+    }
+    let mut storages = HashSet::new();
+    collect_storage_accesses(&func.trace, &mut storages);
+    for s in storages {
+        if let Some(ch) = s.children() {
+            if ch.len() >= 3 {
+                if let Some(slot) = ch[2].as_u64() {
+                    slots.insert(slot);
+                }
+            }
+        }
+    }
+    slots
+}
+
 /// Find storage names from getter functions.
 fn find_storage_names(functions: &[Function]) -> HashMap<Expr, String> {
     let mut names = HashMap::new();
@@ -472,6 +510,9 @@ fn find_storage_names(functions: &[Function]) -> HashMap<Expr, String> {
         let stor_expr = storages.into_iter().next().unwrap();
 
         let mut name = func.name.split('(').next().unwrap_or(&func.name).to_string();
+        if should_skip_storage_getter_name(&name) {
+            continue;
+        }
 
         // Strip "get" prefix.
         if name.starts_with("get") && name.len() > 3 {
@@ -564,12 +605,17 @@ fn heuristic_name_matching(
         if used_names.contains(&lower_name) {
             continue;
         }
+        if should_skip_storage_getter_name(base_name) {
+            continue;
+        }
+
+        let func_slots = collect_func_storage_slots(func);
 
         // Single-param getter → likely a simple mapping (like balanceOf).
         if func.params.len() == 1 {
             // Find an unnamed single-key mapping slot.
             for (&slot, keys) in &slot_to_key {
-                if named_slots.contains(&slot) {
+                if named_slots.contains(&slot) || !func_slots.contains(&slot) {
                     continue;
                 }
                 // Check if this slot has single-key accesses.
@@ -609,7 +655,7 @@ fn heuristic_name_matching(
         // Two-param getter → likely a nested mapping (like allowance).
         if func.params.len() == 2 {
             for (&slot, keys) in &slot_to_key {
-                if named_slots.contains(&slot) {
+                if named_slots.contains(&slot) || !func_slots.contains(&slot) {
                     continue;
                 }
                 // Check for nested mapping: sha3(key2, sha3(key1, slot)) pattern.
@@ -647,30 +693,6 @@ fn heuristic_name_matching(
 
         // Zero-param getter → likely a simple storage variable (like decimals).
         if func.params.is_empty() {
-            // Collect slot numbers accessed by this function's raw traces.
-            let mut func_slots: HashSet<u64> = HashSet::new();
-            for acc in &func.raw_storage_accesses {
-                if let Some(ch) = acc.children() {
-                    if ch.len() >= 3 {
-                        if let Some(slot) = ch[2].as_u64() {
-                            func_slots.insert(slot);
-                        }
-                    }
-                }
-            }
-            // Also check simplified trace.
-            let mut simple_storages: HashSet<Expr> = HashSet::new();
-            collect_storage_accesses(&func.trace, &mut simple_storages);
-            for s in &simple_storages {
-                if let Some(ch) = s.children() {
-                    if ch.len() >= 3 {
-                        if let Some(slot) = ch[2].as_u64() {
-                            func_slots.insert(slot);
-                        }
-                    }
-                }
-            }
-
             // Find an unnamed simple slot that this function accesses.
             for (raw_key, resolved) in assoc.iter() {
                 if resolved.contains_op("map") || resolved.contains_op("array") {
@@ -1155,5 +1177,12 @@ mod tests {
         let functions: Vec<Function> = vec![];
         let names = find_storage_names(&functions);
         assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_should_skip_storage_getter_name() {
+        assert!(should_skip_storage_getter_name("supportsInterface"));
+        assert!(should_skip_storage_getter_name("onERC721Received"));
+        assert!(!should_skip_storage_getter_name("balanceOf"));
     }
 }
