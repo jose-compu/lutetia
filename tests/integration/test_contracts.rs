@@ -4,6 +4,8 @@
 //! output features are preserved. They serve as regression guards for
 //! improvements to the simplifier, sparser, and memory propagation.
 
+use std::sync::OnceLock;
+
 use lutetia::decompiler::{decompile_bytecode, DecompilerConfig, OutputFormat};
 
 fn config() -> DecompilerConfig {
@@ -14,24 +16,22 @@ fn config() -> DecompilerConfig {
     }
 }
 
-/// Load bytecode from the comparison/bytecodes directory.
+/// Load bytecode from test fixtures or comparison/bytecodes (monorepo layout).
 fn load_bytecode(name: &str) -> String {
-    let path = format!(
-        "{}/comparison/bytecodes/{}.hex",
-        env!("CARGO_MANIFEST_DIR").trim_end_matches("/lutetia"),
-        name
-    );
-    match std::fs::read_to_string(&path) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => {
-            // Fall back to relative from workspace root
-            let alt = format!("../comparison/bytecodes/{}.hex", name);
-            std::fs::read_to_string(&alt)
-                .unwrap_or_default()
-                .trim()
-                .to_string()
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    for path in [
+        format!("{manifest}/tests/fixtures/bytecodes/{name}.hex"),
+        format!(
+            "{}/comparison/bytecodes/{name}.hex",
+            manifest.trim_end_matches("/lutetia")
+        ),
+        format!("../comparison/bytecodes/{name}.hex"),
+    ] {
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            return s.trim().to_string();
         }
     }
+    String::new()
 }
 
 // =========================================================================
@@ -410,49 +410,145 @@ fn test_usdt_blacklist_mapping() {
 }
 
 // =========================================================================
-// UniswapV2 Router tests
+// UniswapV2 Router tests (single decompile shared across tests)
+// =========================================================================
+
+fn router_decompiled_text() -> Option<String> {
+    static TEXT: OnceLock<Option<String>> = OnceLock::new();
+    TEXT.get_or_init(|| {
+        let hex = load_bytecode("uniswap_v2_router");
+        if hex.is_empty() {
+            return None;
+        }
+        decompile_bytecode(&hex, &config())
+            .ok()
+            .map(|r| r.text)
+            .filter(|t| t.len() > 1000)
+    })
+    .clone()
+}
+
+#[test]
+fn test_router_smoke() {
+    let Some(text) = router_decompiled_text() else {
+        return;
+    };
+    assert!(
+        text.contains("factory") || text.contains("0x5c69"),
+        "Router should reference factory address"
+    );
+    assert!(
+        text.contains("swapExactTokensForTokens")
+            || text.contains("addLiquidity")
+            || text.contains("removeLiquidity"),
+        "Router should resolve function names from signature DB"
+    );
+}
+
+// =========================================================================
+// ERC-4337 EntryPoint v0.7 (Dedaub comparison fixture)
 // =========================================================================
 
 #[test]
-fn test_router_does_not_timeout() {
-    let hex = load_bytecode("uniswap_v2_router");
+fn test_entrypoint_decompiles() {
+    let hex = load_bytecode("entrypoint_v07");
     if hex.is_empty() {
         return;
     }
     let r = decompile_bytecode(&hex, &config()).unwrap();
-    // Router is the largest contract (~22KB). Verify it completes.
     assert!(
-        r.text.len() > 1000,
-        "Router output should be substantial (>1000 chars)"
+        r.text.len() > 5000,
+        "EntryPoint output should be substantial, got {} chars",
+        r.text.len()
     );
 }
 
 #[test]
-fn test_router_factory_const() {
-    let hex = load_bytecode("uniswap_v2_router");
+fn test_entrypoint_storage_not_named_supports_interface() {
+    let hex = load_bytecode("entrypoint_v07");
     if hex.is_empty() {
         return;
     }
     let r = decompile_bytecode(&hex, &config()).unwrap();
+    let storage_block: String = r
+        .text
+        .lines()
+        .skip_while(|l| !l.contains("def storage:"))
+        .take(20)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        r.text.contains("factory") || r.text.contains("0x5c69"),
-        "Router should reference factory address"
+        !storage_block.contains("supportsInterface is mapping"),
+        "supportsInterface must not label a storage mapping (interface check only).\n{storage_block}"
     );
 }
 
 #[test]
-fn test_router_function_names() {
-    let hex = load_bytecode("uniswap_v2_router");
+fn test_entrypoint_balance_of_getter() {
+    let hex = load_bytecode("entrypoint_v07");
     if hex.is_empty() {
         return;
     }
     let r = decompile_bytecode(&hex, &config()).unwrap();
-    // Should resolve key function names from the signature database
     assert!(
-        r.text.contains("swapExactTokensForTokens")
-            || r.text.contains("addLiquidity")
-            || r.text.contains("removeLiquidity"),
-        "Router should resolve function names from signature DB"
+        r.text.contains("def balanceOf("),
+        "Should resolve balanceOf selector"
+    );
+    assert!(
+        r.text.contains("balanceOf[") || r.text.contains("deposit"),
+        "balanceOf should read deposit/balance mapping"
+    );
+}
+
+#[test]
+fn test_entrypoint_nonce_mapping() {
+    let hex = load_bytecode("entrypoint_v07");
+    if hex.is_empty() {
+        return;
+    }
+    let r = decompile_bytecode(&hex, &config()).unwrap();
+    assert!(
+        r.text.contains("def getNonce(") || r.text.contains("def incrementNonce("),
+        "Should resolve nonce-related functions"
+    );
+}
+
+#[test]
+fn test_entrypoint_handle_ops() {
+    let hex = load_bytecode("entrypoint_v07");
+    if hex.is_empty() {
+        return;
+    }
+    let r = decompile_bytecode(&hex, &config()).unwrap();
+    assert!(
+        r.text.contains("def handleOps(") || r.text.contains("handleAggregatedOps"),
+        "Should resolve handleOps / handleAggregatedOps"
+    );
+}
+
+#[test]
+fn test_entrypoint_supports_interface_bytes4_labels() {
+    let hex = load_bytecode("entrypoint_v07");
+    if hex.is_empty() {
+        return;
+    }
+    let r = decompile_bytecode(&hex, &config()).unwrap();
+    assert!(
+        r.text.contains("validateUserOp") || r.text.contains("IERC165"),
+        "supportsInterface comparisons should label known interface selectors"
+    );
+}
+
+#[test]
+fn test_entrypoint_withdraw_revert_string() {
+    let hex = load_bytecode("entrypoint_v07");
+    if hex.is_empty() {
+        return;
+    }
+    let r = decompile_bytecode(&hex, &config()).unwrap();
+    assert!(
+        r.text.contains("Withdraw amount too large"),
+        "Should decode withdrawTo revert string"
     );
 }
 

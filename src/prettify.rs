@@ -105,6 +105,54 @@ fn is_loop_true_continue(expr: &Expr) -> bool {
 // Solidity panic codes
 // ---------------------------------------------------------------------------
 
+/// Extract a 4-byte ABI selector from a left-padded 32-byte word.
+fn selector_from_padded_word(v: U256) -> Option<u32> {
+    let tail = v & (U256::one() << 96) - U256::one();
+    if !tail.is_zero() {
+        return None;
+    }
+    let selector = (v >> 224).low_u32();
+    if selector == 0 {
+        None
+    } else {
+        Some(selector)
+    }
+}
+
+/// Well-known ABI selectors (ERC-4337 entry point, ERC-165, etc.).
+fn known_selector_name(selector: u32) -> Option<&'static str> {
+    match selector {
+        0x01ffc9a7 => Some("0x01ffc9a7 /* IERC165.supportsInterface */"),
+        0x60fc6b6e => Some("0x60fc6b6e /* validateUserOp */"),
+        0x915074d8 => Some("0x915074d8 /* validatePaymasterUserOp */"),
+        0xcf28ef97 => Some("0xcf28ef97 /* executeUserOp */"),
+        0x3e84f021 => Some("0x3e84f021 /* executeBatch */"),
+        0x8dd7712f => Some("0x8dd7712f /* execute */"),
+        0x0042dc53 => Some("0x0042dc53 /* innerHandleOp */"),
+        _ => None,
+    }
+}
+
+fn known_selector_label(val: &Expr) -> Option<&'static str> {
+    let v = val.as_val()?;
+    let selector = selector_from_padded_word(v).or_else(|| {
+        if v <= U256::from(u32::MAX) {
+            Some(v.low_u32())
+        } else {
+            None
+        }
+    })?;
+    known_selector_name(selector)
+}
+
+fn pret_maybe_selector(expr: &Expr, pret: &impl Fn(&Expr) -> String) -> String {
+    if let Some(label) = known_selector_label(expr) {
+        label.to_string()
+    } else {
+        pret(expr)
+    }
+}
+
 /// Map a Solidity 0.8+ panic code to a human-readable description.
 pub fn panic_code_description(code: u64) -> Option<&'static str> {
     match code {
@@ -299,7 +347,11 @@ fn pretty_node(op: &str, children: &[Expr], add_color: bool) -> String {
 
         // -- Comparisons --
         "eq" if children.len() == 2 => {
-            format!("{} == {}", pret(&children[0]), pret(&children[1]))
+            format!(
+                "{} == {}",
+                pret_maybe_selector(&children[0], &pret),
+                pret_maybe_selector(&children[1], &pret)
+            )
         }
         "lt" if children.len() == 2 => {
             format!("{} < {}", pret(&children[0]), pret(&children[1]))
@@ -621,6 +673,9 @@ fn pretty_node(op: &str, children: &[Expr], add_color: bool) -> String {
             }
             // Selector extraction: mask_shl(32, 224, 0, x) → bytes4(x)
             if size == &Expr::val(32) && offset == &Expr::val(224) && shift.is_zero() {
+                if let Some(label) = known_selector_label(val) {
+                    return format!("bytes4({label})");
+                }
                 return format!("bytes4({})", pret(val));
             }
             // Left-shift: mask_shl(N, 0, M, x) → x << M (when offset is 0)
@@ -1420,6 +1475,19 @@ mod tests {
         );
         assert!(super::is_loop_true_continue(&loop_expr));
         assert_eq!(prettify(&loop_expr, false), "pass");
+    }
+
+    #[test]
+    fn test_known_selector_label_erc165() {
+        let expr = Expr::node4(
+            "mask_shl",
+            Expr::val(32),
+            Expr::val(224),
+            Expr::zero(),
+            Expr::val_u256(U256::from(0x01ffc9a7u64) << 224),
+        );
+        let s = prettify(&expr, false);
+        assert!(s.contains("IERC165"), "got: {s}");
     }
 
     /// LOOP with false condition or non-continue body does not render as "pass".
