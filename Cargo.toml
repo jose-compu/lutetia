@@ -45,9 +45,14 @@ dirs = "6"
 
 [dev-dependencies]
 assert_cmd = "2"
+divan = { version = "5.0.2", package = "codspeed-divan-compat" }
 predicates = "3"
 tempfile = "3"
 
 [[bin]]
 name = "lutetia"
 path = "src/main.rs"
+
+[[bench]]
+name = "decompiler"
+harness = false
