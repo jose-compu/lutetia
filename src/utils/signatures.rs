@@ -78,12 +78,17 @@ fn load_local_db() -> LocalDb {
     LocalDb { functions, events }
 }
 
+/// Recover from a poisoned mutex instead of panicking in library paths.
+fn lock_mutex<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Get or initialise the local DB.
 fn with_local_db<F, T>(f: F) -> T
 where
     F: FnOnce(&LocalDb) -> T,
 {
-    let mut guard = LOCAL_DB.lock().unwrap();
+    let mut guard = lock_mutex(&LOCAL_DB);
     let db = guard.get_or_insert_with(load_local_db);
     f(db)
 }
@@ -104,7 +109,7 @@ pub fn get_func_name(hash: &str) -> Option<String> {
 
     // 2. Try network cache
     {
-        let guard = NET_CACHE.lock().unwrap();
+        let guard = lock_mutex(&NET_CACHE);
         if let Some(ref map) = *guard {
             if let Some(cached) = map.get(&lower) {
                 return cached.clone();
@@ -115,7 +120,7 @@ pub fn get_func_name(hash: &str) -> Option<String> {
     // 3. Fetch from network
     let result = fetch_signature(&lower, "function");
     {
-        let mut guard = NET_CACHE.lock().unwrap();
+        let mut guard = lock_mutex(&NET_CACHE);
         let map = guard.get_or_insert_with(HashMap::new);
         map.insert(lower, result.clone());
     }
@@ -146,7 +151,7 @@ pub fn get_event_name(hash: &str) -> Option<String> {
 
     // 2. Try network cache
     {
-        let guard = NET_CACHE.lock().unwrap();
+        let guard = lock_mutex(&NET_CACHE);
         if let Some(ref map) = *guard {
             if let Some(cached) = map.get(&lower) {
                 return cached.clone();
@@ -157,7 +162,7 @@ pub fn get_event_name(hash: &str) -> Option<String> {
     // 3. Fetch from network
     let result = fetch_signature(&lower, "event");
     {
-        let mut guard = NET_CACHE.lock().unwrap();
+        let mut guard = lock_mutex(&NET_CACHE);
         let map = guard.get_or_insert_with(HashMap::new);
         map.insert(lower, result.clone());
     }

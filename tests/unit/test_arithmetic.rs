@@ -167,6 +167,25 @@ fn test_slt_sgt() {
     assert_eq!(sgt(one, neg1), U256::one());   // 1 > -1
 }
 
+/// GitHub #17: SLT on `2^256 − 2^127` used to panic in `to_signed`.
+#[test]
+fn test_negate_and_slt_2_pow_127_does_not_panic() {
+    let mag = U256::one() << 127;
+    let neg = negate_u256(mag);
+    let _ = to_signed(neg);
+    assert_eq!(slt(neg, U256::one()), U256::one());
+    assert_eq!(slt(neg, U256::zero()), U256::one());
+    assert_eq!(sgt(U256::one(), neg), U256::one());
+    assert_eq!(negate_u256(negate_u256(neg)), neg);
+}
+
+#[test]
+fn test_sdiv_i256_min_over_neg_one() {
+    let min_i256 = U256::one() << 255;
+    let neg1 = MAX;
+    assert_eq!(sdiv(min_i256, neg1), min_i256);
+}
+
 #[test]
 fn test_iszero() {
     assert_eq!(iszero(U256::zero()), U256::one());

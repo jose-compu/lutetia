@@ -245,10 +245,10 @@ fn simplify_sha3(expr: &Expr) -> Expr {
                 return Expr::Node("sha3".into(), new_ch);
             }
         }
-        Some("add") | Some("mul") | Some("div") => {
+        Some(op @ ("add" | "mul" | "div")) => {
             if let Some(ch) = expr.children() {
                 let new_ch: Vec<Expr> = ch.iter().map(simplify_sha3).collect();
-                return Expr::Node(expr.opcode().unwrap().into(), new_ch);
+                return Expr::Node(op.into(), new_ch);
             }
         }
         _ => {}
@@ -507,7 +507,9 @@ fn find_storage_names(functions: &[Function]) -> HashMap<Expr, String> {
             continue;
         }
 
-        let stor_expr = storages.into_iter().next().unwrap();
+        let Some(stor_expr) = storages.into_iter().next() else {
+            continue;
+        };
 
         let mut name = func.name.split('(').next().unwrap_or(&func.name).to_string();
         if should_skip_storage_getter_name(&name) {

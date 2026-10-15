@@ -315,7 +315,9 @@ fn propagate_immutable_returns(functions: &mut [Function]) {
         if func.trace.is_empty() || func.trace.len() > 3 {
             continue;
         }
-        let last = func.trace.last().unwrap();
+        let Some(last) = func.trace.last() else {
+            continue;
+        };
         if last.opcode() != Some("return") {
             continue;
         }
@@ -326,7 +328,12 @@ fn propagate_immutable_returns(functions: &mut [Function]) {
         // Check if return arg is mem(range(concrete_off, ...)).
         if ch[0].opcode() != Some("mem") { continue; }
         let mch = match ch[0].children() {
-            Some(c) if c.len() == 1 && c[0].opcode() == Some("range") => c[0].children().unwrap(),
+            Some(c) if c.len() == 1 && c[0].opcode() == Some("range") => {
+                match c[0].children() {
+                    Some(range_ch) => range_ch,
+                    None => continue,
+                }
+            }
             _ => continue,
         };
         if mch.len() != 2 { continue; }

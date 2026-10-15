@@ -1,7 +1,8 @@
 [package]
 name = "lutetia"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
+rust-version = "1.86"
 description = "EVM bytecode decompiler — the fastest EVM decompiler"
 license = "MIT"
 readme = "README.md"

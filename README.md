@@ -2,12 +2,13 @@
 
 **EVM bytecode decompiler** — Lutetia is the fastest EVM decompiler. Turns EVM bytecode (hex only; no network/RPC) into readable pseudo-Python (Python-style `def`/`if`/`while` with EVM/Solidity types and `require`/calls).
 
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![crates.io](https://img.shields.io/crates/v/lutetia.svg)](https://crates.io/crates/lutetia)
+[![Rust](https://img.shields.io/badge/rust-1.86%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 _Decompiling EVM bytecode is a bit like staring into a fondue pot: everything’s melted together and it’s not obvious what went in._
 
-**Online Version:** [https://jose-compu.github.io/lutetia-web/](https://jose-compu.github.io/lutetia-web/)
+**Online Version:** [https://jose-compu.github.io/lutetia-web/](https://jose-compu.github.io/lutetia-web/) (v0.2.3)
 
 ---
 
@@ -34,7 +35,7 @@ Tested on mainnet bytecodes (WETH, USDT, DAI, Uniswap V2 Factory, Uniswap V2 Rou
 Lutetia is [published on crates.io](https://crates.io/crates/lutetia). Install the CLI and run `lutetia` from the command line:
 
 ```bash
-cargo install lutetia
+cargo install lutetia --version 0.2.3
 lutetia --help
 ```
 
@@ -107,6 +108,10 @@ def approve(address spender, uint256 amount): # not payable
 Lutetia builds on ideas and prior art from [Panoramix](https://github.com/palkeo/panoramix) and [Eveem (eveem.org)](https://eveem.org). We thank the Panoramix and Eveem-org contributors.
 
 ---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

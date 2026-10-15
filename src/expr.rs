@@ -8,11 +8,16 @@ use primitive_types::U256;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Maximum unsigned 256-bit value.
+/// Maximum unsigned 256-bit value (`2^256 − 1`).
 pub const UINT_256_MAX: U256 = U256::MAX;
-/// 2^255 (used for signed arithmetic).
-pub const UINT_256_CEILING: U256 = U256::zero(); // handled via wrapping; see arithmetic
-/// 2^255 − 1
+/// `2^256`, the uint256 modulus.
+///
+/// `U256` cannot store `2^256`, so this is the modular wrap (`0`):
+/// `2^256 ≡ 0 (mod 2^256)`. Use it as a modulus identity, not a magnitude.
+pub const UINT_256_CEILING: U256 = U256::zero();
+/// `2^255`, the signed-256 sign-bit threshold.
+pub const UINT_255_CEILING: U256 = U256([0, 0, 0, 1 << 63]);
+/// `2^255 − 1`
 pub const UINT_255_MAX: U256 = U256([
     u64::MAX,
     u64::MAX,

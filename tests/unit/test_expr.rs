@@ -1,6 +1,8 @@
 //! Extended unit tests for the Expr type.
 
-use lutetia::expr::Expr;
+use lutetia::expr::{
+    Expr, UINT_255_CEILING, UINT_255_MAX, UINT_256_CEILING, UINT_256_MAX,
+};
 use primitive_types::U256;
 
 #[test]
@@ -114,4 +116,14 @@ fn test_expr_clone() {
     let e = Expr::node2("add", Expr::val(1), Expr::atom("x"));
     let c = e.clone();
     assert_eq!(e, c);
+}
+
+/// GitHub #6: `UINT_256_CEILING` is `2^256 ≡ 0 (mod 2^256)`, not `2^255`.
+#[test]
+fn test_uint256_ceiling_is_2_pow_256_mod() {
+    assert_eq!(UINT_256_CEILING, U256::zero());
+    assert_eq!(UINT_256_CEILING, UINT_256_MAX.overflowing_add(U256::one()).0);
+    assert_eq!(UINT_255_CEILING, U256::one() << 255);
+    assert_eq!(UINT_255_MAX, UINT_255_CEILING - U256::one());
+    assert_ne!(UINT_256_CEILING, UINT_255_CEILING);
 }

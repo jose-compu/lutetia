@@ -123,7 +123,9 @@ fn fold_paths(paths: &[Vec<Expr>]) -> Trace {
     if middles.is_empty() {
         // All paths are identical.
     } else if middles.len() == 1 {
-        result.extend(middles.into_iter().next().unwrap());
+        if let Some(middle) = middles.into_iter().next() {
+            result.extend(middle);
+        }
     } else {
         // Try to split into two groups by the first differing element.
         let (group1, group2) = split_into_groups(&middles);
@@ -247,10 +249,9 @@ fn flatten(trace: &[Expr]) -> Trace {
 
 /// Check if a trace always terminates (return/revert/stop/selfdestruct/continue).
 fn ends_execution(trace: &[Expr]) -> bool {
-    if trace.is_empty() {
+    let Some(last) = trace.last() else {
         return false;
-    }
-    let last = trace.last().unwrap();
+    };
     match last.opcode() {
         Some("return") | Some("revert") | Some("stop") | Some("selfdestruct")
         | Some("invalid") | Some("continue") => true,

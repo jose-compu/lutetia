@@ -11,29 +11,40 @@ const UINT_256_MAX: U256 = U256::MAX;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn to_signed(value: U256) -> i128 {
-    // For values that fit in 128 bits of the positive range, treat directly.
-    // For larger values, treat as negative (two's complement).
+/// Two's-complement negate modulo `2^256`.
+///
+/// `-0 == 0`. `-2^255 == 2^255` (the i256 minimum wraps onto itself).
+/// Never panics: uses wrapping arithmetic only.
+pub fn negate_u256(value: U256) -> U256 {
+    (!value).overflowing_add(U256::one()).0
+}
+
+/// Wrapping view of a U256 two's-complement value as `i128`.
+///
+/// Values outside the i128 range are truncated to the low 128 bits.
+/// Negation of `i128::MIN` uses `wrapping_neg` so this never panics
+/// (GitHub #17).
+pub fn to_signed(value: U256) -> i128 {
     let half = U256::one() << 255;
     if value < half {
         value.low_u128() as i128
     } else {
-        // value - 2^256  (negative)
-        // We compute -(2^256 - value).  Since U256 wraps, we do:
-        let neg = (!value).overflowing_add(U256::one()).0;
-        -(neg.low_u128() as i128)
+        let mag = negate_u256(value).low_u128();
+        (mag as i128).wrapping_neg()
     }
 }
 
-/// Convert a signed i128 back to U256 (two's complement).
-fn from_signed(v: i128) -> U256 {
+/// Convert a signed i128 back to U256 (two's complement, wrapping).
+pub fn from_signed(v: i128) -> U256 {
     if v >= 0 {
         U256::from(v as u128)
     } else {
-        // 2^256 + v
-        let pos = (-v) as u128;
-        (!U256::from(pos)).overflowing_add(U256::one()).0
+        negate_u256(U256::from(v.wrapping_neg() as u128))
     }
+}
+
+fn is_negative(value: U256) -> bool {
+    value.bit(255)
 }
 
 // ---------------------------------------------------------------------------
@@ -65,14 +76,22 @@ pub fn div(a: U256, b: U256) -> U256 {
 }
 
 /// EVM SDIV: signed integer division (returns 0 on divide-by-zero).
+///
+/// Uses wrapping U256 two's complement so `i256::MIN / -1` is `i256::MIN`
+/// and no intermediate `i128` negate can overflow.
 pub fn sdiv(a: U256, b: U256) -> U256 {
-    let sa = to_signed(a);
-    let sb = to_signed(b);
-    if sb == 0 {
-        U256::zero()
+    if b.is_zero() {
+        return U256::zero();
+    }
+    let neg_a = is_negative(a);
+    let neg_b = is_negative(b);
+    let abs_a = if neg_a { negate_u256(a) } else { a };
+    let abs_b = if neg_b { negate_u256(b) } else { b };
+    let abs_q = abs_a / abs_b;
+    if neg_a != neg_b {
+        negate_u256(abs_q)
     } else {
-        let sign = if (sa < 0) != (sb < 0) { -1i128 } else { 1 };
-        from_signed(sign * (sa.unsigned_abs() as i128 / sb.unsigned_abs() as i128))
+        abs_q
     }
 }
 
@@ -86,14 +105,19 @@ pub fn modulo(a: U256, b: U256) -> U256 {
 }
 
 /// EVM SMOD: signed modulo (returns 0 when modulus is zero).
+/// Result takes the sign of the dividend.
 pub fn smod(a: U256, b: U256) -> U256 {
-    let sa = to_signed(a);
-    let sb = to_signed(b);
-    if sb == 0 {
-        U256::zero()
+    if b.is_zero() {
+        return U256::zero();
+    }
+    let neg_a = is_negative(a);
+    let abs_a = if neg_a { negate_u256(a) } else { a };
+    let abs_b = if is_negative(b) { negate_u256(b) } else { b };
+    let abs_r = abs_a % abs_b;
+    if neg_a {
+        negate_u256(abs_r)
     } else {
-        let sign = if sa < 0 { -1i128 } else { 1 };
-        from_signed(sign * (sa.unsigned_abs() as i128 % sb.unsigned_abs() as i128))
+        abs_r
     }
 }
 
@@ -184,16 +208,19 @@ pub fn gt(a: U256, b: U256) -> U256 {
 
 /// EVM SLT: signed less-than comparison (two's complement).
 pub fn slt(a: U256, b: U256) -> U256 {
-    let sa = to_signed(a);
-    let sb = to_signed(b);
-    if sa < sb { U256::one() } else { U256::zero() }
+    let na = is_negative(a);
+    let nb = is_negative(b);
+    let less = match (na, nb) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => a < b,
+    };
+    if less { U256::one() } else { U256::zero() }
 }
 
 /// EVM SGT: signed greater-than comparison (two's complement).
 pub fn sgt(a: U256, b: U256) -> U256 {
-    let sa = to_signed(a);
-    let sb = to_signed(b);
-    if sa > sb { U256::one() } else { U256::zero() }
+    slt(b, a)
 }
 
 /// EVM EQ: equality comparison.
@@ -260,11 +287,18 @@ pub fn shr(shift: U256, value: U256) -> U256 {
 
 /// EVM SAR: arithmetic shift right (Constantinople, preserves sign).
 pub fn sar(shift: U256, value: U256) -> U256 {
-    let sv = to_signed(value);
     if shift >= U256::from(256u64) {
-        if sv >= 0 { U256::zero() } else { UINT_256_MAX }
+        return if is_negative(value) { UINT_256_MAX } else { U256::zero() };
+    }
+    let s = shift.low_u64() as usize;
+    if s == 0 {
+        return value;
+    }
+    let logical = value >> s;
+    if is_negative(value) {
+        logical | (UINT_256_MAX << (256 - s))
     } else {
-        from_signed(sv >> shift.low_u64())
+        logical
     }
 }
 
@@ -405,5 +439,21 @@ mod tests {
         let m = U256::from(8u64);
         assert_eq!(addmod(a, b, m), U256::from(4u64)); // (10+10) % 8 = 4
         assert_eq!(mulmod(a, b, m), U256::from(4u64)); // (10*10) % 8 = 4
+    }
+
+    /// GitHub #17: `-(mag as i128)` panicked when `|value|` low 128 bits were `2^127`.
+    #[test]
+    fn test_negate_helper_no_overflow() {
+        assert_eq!(negate_u256(U256::zero()), U256::zero());
+        assert_eq!(negate_u256(U256::one()), UINT_256_MAX);
+
+        let mag_2_127 = U256::one() << 127;
+        let neg_2_127 = negate_u256(mag_2_127);
+        assert_eq!(negate_u256(neg_2_127), mag_2_127);
+        let _ = to_signed(neg_2_127);
+        let _ = from_signed(i128::MIN);
+
+        let min_i256 = U256::one() << 255;
+        assert_eq!(negate_u256(min_i256), min_i256);
     }
 }
