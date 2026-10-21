@@ -5,6 +5,7 @@
 [![crates.io](https://img.shields.io/crates/v/lutetia.svg)](https://crates.io/crates/lutetia)
 [![Rust](https://img.shields.io/badge/rust-1.86%2B-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/jose-compu/lutetia?utm_source=badge)
 
 _Decompiling EVM bytecode is a bit like staring into a fondue pot: everything’s melted together and it’s not obvious what went in._
 
