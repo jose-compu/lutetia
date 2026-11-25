@@ -7,6 +7,7 @@ pub mod core;
 pub mod utils;
 
 pub mod contract;
+pub mod deadline;
 pub mod decompiler;
 pub mod errors;
 pub mod expr;

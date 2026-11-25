@@ -8,7 +8,7 @@
 
 _Decompiling EVM bytecode is a bit like staring into a fondue pot: everything’s melted together and it’s not obvious what went in._
 
-**Online Version:** [https://jose-compu.github.io/lutetia-web/](https://jose-compu.github.io/lutetia-web/) (v0.2.3)
+**Online Version:** [https://jose-compu.github.io/lutetia-web/](https://jose-compu.github.io/lutetia-web/) (v0.2.4)
 
 ---
 
@@ -35,7 +35,7 @@ Tested on mainnet bytecodes (WETH, USDT, DAI, Uniswap V2 Factory, Uniswap V2 Rou
 Lutetia is [published on crates.io](https://crates.io/crates/lutetia). Install the CLI and run `lutetia` from the command line:
 
 ```bash
-cargo install lutetia --version 0.2.3
+cargo install lutetia --version 0.2.4
 lutetia --help
 ```
 

@@ -79,6 +79,9 @@ fn main() -> Result<()> {
     };
 
     let result = decompile_bytecode(&hex_code, &config)?;
+    if result.truncated {
+        eprintln!("lutetia: truncated");
+    }
     println!("{}", result.text);
 
     Ok(())

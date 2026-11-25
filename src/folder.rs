@@ -8,31 +8,50 @@
 //! 2. `fold_paths` — Re-fold by finding common prefixes/suffixes.
 //! 3. `fold_aux` — Post-processing: remove unnecessary else when one branch terminates.
 
+use crate::deadline::Deadline;
 use crate::expr::{Expr, Trace};
+
+/// Paths unfolded from one trace. Beyond this, folding stops and the caller keeps the trace.
+const MAX_FOLD_PATHS: usize = 4_096;
+
+/// Folding could not finish. The caller should keep the unfolded trace.
+#[derive(Debug, thiserror::Error)]
+pub enum FoldError {
+    #[error("folder stopped: timeout")]
+    Timeout,
+    #[error("folder stopped: path limit ({0})")]
+    PathLimit(usize),
+}
 
 // ===========================================================================
 // Public entry point
 // ===========================================================================
 
 /// Fold a trace into a more concise if/else structure.
+///
+/// On timeout or path limit, returns the original trace and logs the reason.
 pub fn fold(trace: &[Expr]) -> Trace {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let paths = as_paths(trace, &[]);
-        if paths.is_empty() {
-            return trace.to_vec();
-        }
-        let merged = fold_paths(&paths);
-        let merged = flatten(&merged);
-        let merged = make_ifs(&merged);
-        let merged = merge_ifs(&merged);
-        fold_aux(&merged)
-    })) {
-        Ok(result) => result,
-        Err(_) => {
-            log::warn!("Folder failed, returning trace as-is");
-            trace.to_vec()
-        }
+    fold_until(trace, &Deadline::after(30)).unwrap_or_else(|err| {
+        log::warn!("folder skipped: {err}");
+        trace.to_vec()
+    })
+}
+
+/// Fold a trace, stopping when `deadline` expires or the path budget is spent.
+pub fn fold_until(trace: &[Expr], deadline: &Deadline) -> Result<Trace, FoldError> {
+    if deadline.expired() {
+        return Err(FoldError::Timeout);
     }
+    let mut remaining = MAX_FOLD_PATHS;
+    let paths = as_paths(trace, &[], deadline, &mut remaining)?;
+    if paths.is_empty() {
+        return Ok(trace.to_vec());
+    }
+    let merged = fold_paths(&paths);
+    let merged = flatten(&merged);
+    let merged = make_ifs(&merged);
+    let merged = merge_ifs(&merged);
+    Ok(fold_aux(&merged))
 }
 
 // ===========================================================================
@@ -42,7 +61,15 @@ pub fn fold(trace: &[Expr]) -> Trace {
 /// Convert a structured trace into a list of branchless paths.
 /// Each path is a Vec<Expr> representing one complete execution route.
 /// `if` nodes become condition assertions inline in the path.
-fn as_paths(trace: &[Expr], prefix: &[Expr]) -> Vec<Vec<Expr>> {
+fn as_paths(
+    trace: &[Expr],
+    prefix: &[Expr],
+    deadline: &Deadline,
+    remaining: &mut usize,
+) -> Result<Vec<Vec<Expr>>, FoldError> {
+    if deadline.expired() {
+        return Err(FoldError::Timeout);
+    }
     let mut path = prefix.to_vec();
 
     for line in trace {
@@ -58,9 +85,9 @@ fn as_paths(trace: &[Expr], prefix: &[Expr]) -> Vec<Vec<Expr>> {
                     let mut false_prefix = path.clone();
                     false_prefix.push(cond.is_zero_wrap());
 
-                    let mut result = as_paths(&if_true, &true_prefix);
-                    result.extend(as_paths(&if_false, &false_prefix));
-                    return result;
+                    let mut result = as_paths(&if_true, &true_prefix, deadline, remaining)?;
+                    result.extend(as_paths(&if_false, &false_prefix, deadline, remaining)?);
+                    return Ok(result);
                 }
                 path.push(line.clone());
             }
@@ -79,7 +106,11 @@ fn as_paths(trace: &[Expr], prefix: &[Expr]) -> Vec<Vec<Expr>> {
         }
     }
 
-    vec![path]
+    if *remaining == 0 {
+        return Err(FoldError::PathLimit(MAX_FOLD_PATHS));
+    }
+    *remaining -= 1;
+    Ok(vec![path])
 }
 
 // ===========================================================================
@@ -489,10 +520,15 @@ fn extract_seq(expr: Option<&Expr>) -> Vec<Expr> {
 mod tests {
     use super::*;
 
+    fn paths_of(trace: &[Expr]) -> Vec<Vec<Expr>> {
+        let mut remaining = MAX_FOLD_PATHS;
+        as_paths(trace, &[], &Deadline::after(30), &mut remaining).unwrap()
+    }
+
     #[test]
     fn test_as_paths_simple() {
         let trace = vec![Expr::atom("a"), Expr::atom("b"), Expr::node0("stop")];
-        let paths = as_paths(&trace, &[]);
+        let paths = paths_of(&trace);
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].len(), 3);
     }
@@ -508,7 +544,7 @@ mod tests {
                 Expr::node("seq", vec![Expr::atom("c"), Expr::node0("revert")]),
             ),
         ];
-        let paths = as_paths(&trace, &[]);
+        let paths = paths_of(&trace);
         assert_eq!(paths.len(), 2);
         // Path 1: a, cond, b, stop
         assert!(paths[0].contains(&Expr::atom("cond")));
@@ -546,6 +582,13 @@ mod tests {
         assert!(ends_execution(&[Expr::atom("a"), Expr::node0("return")]));
         assert!(!ends_execution(&[Expr::atom("a")]));
         assert!(!ends_execution(&[]));
+    }
+
+    #[test]
+    fn test_fold_timeout_returns_error() {
+        let trace = vec![Expr::node0("stop")];
+        let err = fold_until(&trace, &Deadline::after(0)).unwrap_err();
+        assert!(err.to_string().contains("timeout"));
     }
 
     #[test]

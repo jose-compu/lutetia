@@ -1,12 +1,10 @@
 //! End-to-end tests for the CLI binary.
 
-#[allow(deprecated)]
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-#[allow(deprecated)]
 fn cmd() -> Command {
-    Command::cargo_bin("lutetia").unwrap()
+    assert_cmd::cargo::cargo_bin_cmd!("lutetia")
 }
 
 #[test]

@@ -88,8 +88,50 @@ fn test_empty_bytecode() {
 #[test]
 fn test_invalid_hex() {
     let r = decompile_bytecode("xyz", &config_text());
-    // Should not panic — may fail or produce empty
-    assert!(r.is_ok() || r.is_err());
+    assert!(r.is_err(), "invalid hex must fail");
+}
+
+/// Chain of symbolic JUMPI diamonds. Unbounded trace duplication used to exhaust memory.
+fn diamond_chain(n: usize) -> String {
+    let mut bytes = Vec::new();
+    for i in 0..n {
+        let start = i * 14;
+        let true_jd = (start + 9) as u8;
+        let join = (start + 13) as u8;
+        bytes.extend_from_slice(&[
+            0x60, true_jd, 0x60, 0x00, 0x35, 0x57, 0x60, join, 0x56, 0x5b, 0x60, join, 0x56, 0x5b,
+        ]);
+    }
+    bytes.push(0x00);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn test_branchy_bytecode_stays_bounded() {
+    let started = std::time::Instant::now();
+    let config = DecompilerConfig {
+        timeout_secs: 3,
+        format: OutputFormat::Text,
+        color: false,
+    };
+    let result = decompile_bytecode(&diamond_chain(16), &config).expect("decompile");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed.as_secs() < 20,
+        "branchy bytecode ran for {elapsed:?}"
+    );
+    assert!(
+        result.text.len() < 2_000_000,
+        "output grew to {} bytes",
+        result.text.len()
+    );
+    assert!(
+        result.truncated
+            || result.text.contains("truncated")
+            || result.text.contains("Decompilation aborted"),
+        "expected truncation, got {} bytes",
+        result.text.len()
+    );
 }
 
 // ---- Storage ----

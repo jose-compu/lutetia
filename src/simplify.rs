@@ -15,8 +15,8 @@ use crate::core::algebra;
 use crate::core::arithmetic as arith;
 use crate::expr::{Expr, Trace, UINT_256_MAX};
 use crate::utils::helpers::{replace_f, rewrite_trace, to_exp2};
+use crate::deadline::Deadline;
 use primitive_types::U256;
-use std::time::Instant;
 
 /// Maximum number of simplification iterations.
 const MAX_ITERATIONS: usize = 40;
@@ -26,18 +26,34 @@ const MAX_ITERATIONS: usize = 40;
 // ===========================================================================
 
 /// Simplify a trace by running all passes until convergence.
-pub fn simplify_trace(trace: &[Expr], timeout_secs: u64, _debug_name: Option<&str>) -> Trace {
-    let start = Instant::now();
-    let timeout = if timeout_secs == 0 { 30 } else { timeout_secs };
+pub fn simplify_trace(trace: &[Expr], timeout_secs: u64, debug_name: Option<&str>) -> Trace {
+    let secs = if timeout_secs == 0 { 30 } else { timeout_secs };
+    simplify_trace_until(trace, &Deadline::after(secs), debug_name).0
+}
 
-    let should_quit = || start.elapsed().as_secs() > timeout;
-
+/// Same as [`simplify_trace`], using a caller-owned deadline.
+///
+/// The boolean is true when the deadline expired before the passes finished.
+pub fn simplify_trace_until(
+    trace: &[Expr],
+    deadline: &Deadline,
+    _debug_name: Option<&str>,
+) -> (Trace, bool) {
     let mut trace = trace.to_vec();
+    if deadline.expired() {
+        return (trace, true);
+    }
+
+    let mut truncated = false;
     let mut count = 0;
 
     loop {
         count += 1;
-        if count > MAX_ITERATIONS || should_quit() {
+        if deadline.expired() {
+            truncated = true;
+            break;
+        }
+        if count > MAX_ITERATIONS {
             break;
         }
 
@@ -92,10 +108,13 @@ pub fn simplify_trace(trace: &[Expr], timeout_secs: u64, _debug_name: Option<&st
         }
     }
 
-    // Post-processing: readability.
-    trace = readability_pass(&trace);
+    if deadline.expired() {
+        truncated = true;
+    } else {
+        trace = readability_pass(&trace);
+    }
 
-    trace
+    (trace, truncated)
 }
 
 // ===========================================================================

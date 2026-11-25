@@ -7,6 +7,7 @@
 
 use crate::core::algebra;
 use crate::core::arithmetic as arith;
+use crate::deadline::Deadline;
 use crate::errors;
 use crate::expr::{Expr, Trace};
 use crate::loader::Loader;
@@ -16,6 +17,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
+/// Visits of the CFG while building a trace. Past this, emit a truncation marker.
+const MAX_TRACE_STEPS: usize = 16_384;
 
 // ---------------------------------------------------------------------------
 // Jump-destination signature for loop detection
@@ -181,8 +184,18 @@ impl VM {
 
     /// Run BFS symbolic execution from a given start offset.
     pub fn run(&mut self, start: usize, stack: Vec<Expr>, timeout_secs: u64) -> Trace {
+        let secs = if timeout_secs == 0 { DEFAULT_TIMEOUT_SECS } else { timeout_secs };
+        self.run_until(start, stack, &Deadline::after(secs)).0
+    }
+
+    /// Run until `deadline`. The boolean is true when the trace was cut short.
+    pub fn run_until(
+        &mut self,
+        start: usize,
+        stack: Vec<Expr>,
+        deadline: &Deadline,
+    ) -> (Trace, bool) {
         let time_start = Instant::now();
-        let timeout = if timeout_secs == 0 { DEFAULT_TIMEOUT_SECS } else { timeout_secs };
         let known_jds = self.loader.jump_dests.clone();
 
         let mut arena = Arena::new();
@@ -206,29 +219,36 @@ impl VM {
 
         let max_nodes = errors::MAX_NODE_COUNT;
         let should_quit = |arena: &Arena| -> bool {
-            arena.len() > max_nodes || time_start.elapsed().as_secs() > timeout
+            arena.len() > max_nodes || deadline.expired()
         };
+
+        let mut truncated = false;
 
         // BFS: outer loop (up to 20 iterations for loop re-expansion).
         for _outer in 0..20 {
             // Inner loop: expand + detect loops.
             for _inner in 0..200 {
-                self.expand_all(&mut arena, &known_jds);
+                if self.expand_all(&mut arena, &known_jds, deadline) {
+                    truncated = true;
+                }
                 self.detect_loops(&mut arena);
 
-                if arena.unexplored().is_empty() || should_quit(&arena) {
+                if truncated || arena.unexplored().is_empty() || should_quit(&arena) {
                     break;
                 }
             }
 
-            self.resolve_loops(&mut arena, &known_jds);
+            if !truncated && !deadline.expired() {
+                self.resolve_loops(&mut arena, &known_jds);
+            }
 
-            if arena.unexplored().is_empty() || should_quit(&arena) {
+            if truncated || arena.unexplored().is_empty() || should_quit(&arena) {
                 break;
             }
         }
 
         if should_quit(&arena) {
+            truncated = true;
             log::warn!(
                 "VM stopped prematurely: {} nodes, {:.1}s elapsed",
                 arena.len(),
@@ -238,17 +258,30 @@ impl VM {
 
         // Convert the node graph to a linear trace.
         let mut visited = std::collections::HashSet::new();
-        self.make_trace(&arena, root_id, &mut visited)
+        let mut emitted = 0usize;
+        let trace = self.make_trace(
+            &arena,
+            root_id,
+            &mut visited,
+            deadline,
+            &mut emitted,
+            &mut truncated,
+        );
+        (trace, truncated)
     }
 
     // -- BFS phases ---------------------------------------------------------
 
-    /// Expand all unexplored nodes.
-    fn expand_all(&mut self, arena: &mut Arena, known_jds: &[usize]) {
+    /// Expand all unexplored nodes. Returns true when the deadline or node cap stops the walk.
+    fn expand_all(&mut self, arena: &mut Arena, known_jds: &[usize], deadline: &Deadline) -> bool {
         let unexplored: Vec<usize> = arena.unexplored();
         for node_id in unexplored {
+            if deadline.expired() || arena.len() > errors::MAX_NODE_COUNT {
+                return true;
+            }
             self.execute_node(arena, node_id, known_jds);
         }
+        false
     }
 
     /// Execute a single node: run bytecode from its start until the next
@@ -553,11 +586,26 @@ impl VM {
 
     /// Convert the CFG node graph into a flat trace with if/label/goto constructs.
     /// Uses iterative traversal for Jump edges to avoid stack overflow on long chains.
-    fn make_trace(&self, arena: &Arena, start_id: usize, visited: &mut std::collections::HashSet<usize>) -> Trace {
+    fn make_trace(
+        &self,
+        arena: &Arena,
+        start_id: usize,
+        visited: &mut std::collections::HashSet<usize>,
+        deadline: &Deadline,
+        emitted: &mut usize,
+        truncated: &mut bool,
+    ) -> Trace {
         let mut result = Trace::new();
         let mut current_id = start_id;
 
         loop {
+            if *truncated || deadline.expired() || *emitted >= MAX_TRACE_STEPS {
+                *truncated = true;
+                result.push(Self::truncation_marker());
+                return result;
+            }
+            *emitted += 1;
+
             if !visited.insert(current_id) {
                 // Already visited — emit a goto to prevent cycles.
                 result.push(Expr::node1("goto", Expr::val(current_id as u64)));
@@ -579,7 +627,13 @@ impl VM {
 
             // Append the node's computed trace.
             if let Some(ref trace) = node.trace {
+                *emitted = emitted.saturating_add(trace.len());
                 result.extend(trace.clone());
+                if *emitted >= MAX_TRACE_STEPS {
+                    *truncated = true;
+                    result.push(Self::truncation_marker());
+                    return result;
+                }
             }
 
             // Follow the edge.
@@ -592,9 +646,23 @@ impl VM {
                 }
                 CfgEdge::Branch(cond, true_id, false_id) => {
                     let mut true_visited = visited.clone();
+                    let if_true = self.make_trace(
+                        arena,
+                        *true_id,
+                        &mut true_visited,
+                        deadline,
+                        emitted,
+                        truncated,
+                    );
                     let mut false_visited = visited.clone();
-                    let if_true = self.make_trace(arena, *true_id, &mut true_visited);
-                    let if_false = self.make_trace(arena, *false_id, &mut false_visited);
+                    let if_false = self.make_trace(
+                        arena,
+                        *false_id,
+                        &mut false_visited,
+                        deadline,
+                        emitted,
+                        truncated,
+                    );
                     result.push(Expr::node3(
                         "if",
                         cond.clone(),
@@ -618,6 +686,10 @@ impl VM {
                 }
             }
         }
+    }
+
+    fn truncation_marker() -> Expr {
+        Expr::node1("undefined", Expr::atom("timeout or trace limit"))
     }
 
     // -- Individual opcode handling -----------------------------------------
@@ -967,5 +1039,15 @@ mod tests {
         // A loop that the BFS should handle (or timeout).
         let trace = run_bytecode("5b6000565b00");
         assert!(!trace.is_empty());
+    }
+
+    #[test]
+    fn test_vm_expired_deadline_truncates() {
+        let mut loader = Loader::new();
+        loader.load_binary("5b6000565b00").unwrap();
+        let mut vm = VM::new(loader, false);
+        let (trace, truncated) = vm.run_until(0, vec![], &crate::deadline::Deadline::after(0));
+        assert!(truncated);
+        assert!(trace.len() < 8);
     }
 }

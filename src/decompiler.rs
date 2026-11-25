@@ -4,13 +4,14 @@
 //! generation to produce a full decompilation.
 
 use crate::contract::{ConstDecl, Contract};
+use crate::deadline::Deadline;
 use crate::expr::Expr;
 use crate::folder;
 use crate::function::Function;
 use crate::loader::Loader;
 use crate::prettify::{pprint_trace, prettify};
 use crate::rewriter;
-use crate::simplify::{flatten_caller_dispatch, simplify_trace};
+use crate::simplify::{flatten_caller_dispatch, simplify_trace_until};
 use crate::sparser;
 use crate::utils::signatures::get_func_name;
 use crate::vm::VM;
@@ -29,6 +30,8 @@ pub enum OutputFormat {
 pub struct Decompilation {
     pub text: String,
     pub contract: Contract,
+    /// True when the timeout or a size budget cut the result short.
+    pub truncated: bool,
 }
 
 /// Configuration for the decompiler.
@@ -63,7 +66,7 @@ pub fn decompile_bytecode(hex_code: &str, config: &DecompilerConfig) -> Result<D
         let asm_lines = loader.disasm();
         let text = asm_lines.join("\n");
         let contract = Contract::new(vec![], vec![]);
-        return Ok(Decompilation { text, contract });
+        return Ok(Decompilation { text, contract, truncated: false });
     }
 
     // Discover functions from the dispatch table.
@@ -75,11 +78,15 @@ pub fn decompile_bytecode(hex_code: &str, config: &DecompilerConfig) -> Result<D
     // Decompile each function.
     let mut functions = Vec::new();
     let mut problems: Vec<(String, String)> = Vec::new();
+    let mut any_truncated = false;
 
     if loader.func_list.is_empty() {
         // Whole contract as a single function (fallback).
         match decompile_function(&loader, "fallback", "fallback()", 0, vec![], config) {
-            Ok(f) => functions.push(f),
+            Ok((f, trunc)) => {
+                any_truncated |= trunc;
+                functions.push(f);
+            }
             Err(e) => problems.push(("fallback".to_string(), e.to_string())),
         }
     } else {
@@ -89,10 +96,20 @@ pub fn decompile_bytecode(hex_code: &str, config: &DecompilerConfig) -> Result<D
             .collect();
         for (hash, name, target, stack) in entries {
             match decompile_function(&loader, &hash, &name, target, stack, config) {
-                Ok(f) => functions.push(f),
+                Ok((f, trunc)) => {
+                    any_truncated |= trunc;
+                    functions.push(f);
+                }
                 Err(e) => problems.push((hash, e.to_string())),
             }
         }
+    }
+
+    if any_truncated {
+        problems.push((
+            "decompiler".to_string(),
+            "decompilation truncated: timeout or trace limit".to_string(),
+        ));
     }
 
     // Run storage analysis: detect arrays, mappings, structs, and name slots.
@@ -122,7 +139,7 @@ pub fn decompile_bytecode(hex_code: &str, config: &DecompilerConfig) -> Result<D
         OutputFormat::Asm => unreachable!(),
     };
 
-    Ok(Decompilation { text, contract })
+    Ok(Decompilation { text, contract, truncated: any_truncated })
 }
 
 /// Collapse string getter functions (e.g., name(), symbol()) into a clean form.
@@ -440,9 +457,11 @@ fn decompile_function(
     start: usize,
     stack: Vec<Expr>,
     config: &DecompilerConfig,
-) -> Result<Function> {
+) -> Result<(Function, bool)> {
+    let secs = if config.timeout_secs == 0 { 60 } else { config.timeout_secs };
+    let deadline = Deadline::after(secs);
     let mut vm = VM::new(loader.clone(), false);
-    let raw_trace = vm.run(start, stack.clone(), config.timeout_secs);
+    let (raw_trace, mut truncated) = vm.run_until(start, stack.clone(), &deadline);
 
     // Check for simple immutable getter (no calldata params):
     // setmem(free_ptr), setmem(ret_off, concrete_val), return(mem[ret_off len ...])
@@ -453,7 +472,7 @@ fn decompile_function(
                 vec![Expr::node1("return", const_val)]);
             func.raw_storage_accesses = Vec::new();
             func.resolved_vars = std::collections::HashMap::new();
-            return Ok(func);
+            return Ok((func, truncated));
         }
     }
 
@@ -463,11 +482,19 @@ fn decompile_function(
     // Collect raw storage accesses and build variable resolution map.
     let (raw_storage, resolved_vars) = collect_raw_storage_and_vars(&trace);
 
-    // Simplify.
-    let simplified = simplify_trace(&trace, config.timeout_secs, None);
+    // Simplify. The deadline is the one started above, not a fresh clock.
+    let (simplified, simp_truncated) = simplify_trace_until(&trace, &deadline, None);
+    truncated |= simp_truncated;
 
     // Fold execution paths into concise if/else structures.
-    let simplified = folder::fold(&simplified);
+    let simplified = match folder::fold_until(&simplified, &deadline) {
+        Ok(folded) => folded,
+        Err(err) => {
+            log::warn!("folder skipped: {err}");
+            truncated = true;
+            simplified
+        }
+    };
 
     // Flatten nested caller-dispatch (if not caller == A: if not caller == B: ...) into flat if caller == A: ... if caller == B: ...
     let simplified = flatten_caller_dispatch(&simplified);
@@ -478,7 +505,7 @@ fn decompile_function(
     let mut func = Function::new(selector_hash.to_string(), name.to_string(), simplified);
     func.raw_storage_accesses = raw_storage;
     func.resolved_vars = resolved_vars;
-    Ok(func)
+    Ok((func, truncated))
 }
 
 /// Collect all storage access expressions from a trace, resolving variable
@@ -988,8 +1015,11 @@ mod tests {
             format: OutputFormat::Text,
             color: false,
         };
-        let result = decompile_bytecode("600360020160005260206000f3", &config);
-        // May or may not parse cleanly, but should not panic
-        assert!(result.is_ok() || result.is_err());
+        let result = decompile_bytecode("600360020160005260206000f3", &config).unwrap();
+        assert!(
+            result.text.contains("return"),
+            "expected a return, got:\n{}",
+            result.text
+        );
     }
 }
